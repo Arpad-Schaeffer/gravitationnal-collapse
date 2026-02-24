@@ -1,62 +1,95 @@
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
 
+# Paramètres
+M = 1.0
+R0 = 4.0 * M 
+E = np.sqrt(1 - 2*M/R0)
 
-def schwarzschild_radius(M):
-    """
-    Calcul du rayon de Schwarzschild pour une masse M.
-    r_s = 2GM/c^2
-    """
-    G = 6.67430e-11  # Constante gravitationnelle en m^3 kg^-1 s^-2
-    c = 299792458     # Vitesse de la lumière en m/s
-    return 2 * G * M / c**2
-
-c = 299792458  # Vitesse de la lumière en m/s
-G=6.67430e-11  # Constante gravitationnelle en m^3 kg^-1 s^-2
-Msun = 1.989e30  # Masse du Soleil en kg    
-def ff_EF_time(r0, r, M):
-    """
-    Calcul du temps coordonné par intégration numérique.
-    r décroît de r0 vers 0, donc on separe entre les deux régions:
-- r > r_s : descente vers le trou noir
-- r < r_s : chute libre à l'intérieur du trou noir
-    dt/dr = sqrt(1-r_s/r0) / (1-r_s/r) * (-1/(c*sqrt(r_s/r - r_s/r0)))
-    """
-    r_s = schwarzschild_radius(M)
-    r = np.asarray(r)
-    dt_dr = np.zeros_like(r, dtype=float)
-    
-    # Masques pour les deux régions
-    mask_out = r > r_s  # Région r > r_s (reachable)
-    mask_in = r < r_s   # Région r < r_s (intérieur)
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        # Région extérieure
-        if np.any(mask_out):
-            dt_dr[mask_out] = np.sqrt(1 - r_s/r0) / (1 - r_s/r[mask_out]) * (-1) / (c * np.sqrt(r_s/r[mask_out] - r_s/r0)) + 1/c * 1/(r[mask_out]/r_s - 1)
+def surface_evolution_stable():
+    # 1. On intègre r et V (Eddington-Finkelstein) par rapport à tau
+    # V = t + r* est régulier à l'horizon pour une chute vers l'intérieur.
+    def derivatives(tau, y):
+        r, V = y
+        if r <= 0.01: return [0, 0]
         
-        # Région intérieure
-        if np.any(mask_in):
-            dt_dr[mask_in] = np.sqrt(1 - r_s/r0) / (1 - r_s/r[mask_in]) * (-1) / (c * np.sqrt(r_s/r[mask_in] - r_s/r0)) + 1/c * 1/(r[mask_in]/r_s - 1)
-            #dt_dr[mask_in] = np.clip(dt_dr[mask_in], -2, None)  # Clip à -2 pour régulariser à r_s
+        dr_dtau = -np.sqrt(2*M/r - 2*M/R0)
+        # Formule stable pour dV/dtau (pas de division par 0 à l'horizon !)
+        dV_dtau = 1.0 / (E - dr_dtau)
+        
+        return [dr_dtau, dV_dtau]
+
+    # Conditions initiales à tau = 0 (on part de t=0)
+    # r_star = r + 2M * ln|r/2M - 1|
+    r_start = R0 - 1e-6
+    V0 = r_start + 2*M*np.log(r_start/(2*M) - 1.0)
     
-    dr = np.gradient(r)
-    t_coord = np.cumsum((dt_dr * dr))
-    t_coord += 20*r_s/c  # Normaliser pour que t=0 à r=r0
-    return t_coord
+    sol = solve_ivp(derivatives, (0, 20), [r_start, V0], 
+                    t_eval=np.linspace(0, 15, 1000), method='RK45')
+    
+    r_path = sol.y[0]
+    V_path = sol.y[1]
 
-fig, ax = plt.subplots()
-M = 10 * Msun  # Masse du trou noir en kg
-r_s = schwarzschild_radius(M)
-r0 = 5 * r_s  # Rayon initial de chute libre
+    # 2. CONVERSION STABLE VERS u, v (Sans passer par t !)
+    # On utilise les définitions : 
+    # v + u = exp(V/4M)
+    # v - u = (1 - r/2M) * exp(r/2M) * exp(-V/4M)
+    
+    v_plus_u = np.exp(V_path / (4.0 * M))
+    v_minus_u = (1.0 - r_path/(2.0 * M)) * np.exp(r_path/(2.0 * M)) / v_plus_u
+    
+    v_k = 0.5 * (v_plus_u + v_minus_u)
+    u_k = 0.5 * (v_plus_u - v_minus_u)
+    
+    # On peut reconstruire t a posteriori pour le graph de gauche
+    # t = V - r_star
+    r_star = r_path + 2*M*np.log(np.abs(r_path/(2*M) - 1.0))
+    t_path = V_path - r_star
+    
+    return u_k, v_k, r_path, t_path
 
-r = np.linspace(0.1 * schwarzschild_radius(M), 5 * schwarzschild_radius(M), 1000)  # Rayon de chute libre
-t_coord = ff_EF_time(r0, r, M)
-ax.plot(r/r_s, t_coord/r_s*c, label='Temps coordonné (EF)')
-ax.set_xlabel('Rayon (r/r_s)')
-ax.set_ylabel('Temps coordonné EF / (r_s/c)')
-ax.set_title('Temps coordonné en fonction du rayon pour une chute libre')
-ax.legend()
-ax.grid(alpha=0.3)
-plt.show()
-fig.savefig('temps_coordonne.png', dpi=150, bbox_inches='tight')
+def plot_collapse():
+    u_surf, v_surf, r_path, t_path = surface_evolution_stable()
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # --- GRAPH 1 : SCHWARZSCHILD ---
+    axes[0].plot(r_path, t_path, 'brown', lw=3, label="Surface")
+    axes[0].axvline(2*M, color='r', ls='--', label="Horizon")
+    axes[0].set_xlabel('r')
+    axes[0].set_ylabel('t')
+    axes[0].set_title('Vue Schwarzschild (gelée à l\'horizon)')
+    axes[0].set_ylim(0, 20)
+    axes[0].legend()
+
+    # --- GRAPH 2 : KRUSKAL ---
+    # Singularité r=0
+    u_sing = np.linspace(-4, 4, 500)
+    axes[1].plot(u_sing, np.sqrt(1 + u_sing**2), 'k', lw=3, label="Singularité r=0")
+    
+    # Horizons
+    axes[1].plot([-4, 4], [-4, 4], 'k--', alpha=0.3)
+    axes[1].plot([-4, 4], [4, -4], 'k--', alpha=0.3)
+    
+    # Trajectoire de la surface
+    axes[1].plot(u_surf, v_surf, 'brown', lw=4, label="Surface de l'étoile")
+    
+    # Ajout d'un cône de lumière sur la surface pour vérifier du/dv=1
+    idx = 500 # milieu de la chute
+    u0, v0 = u_surf[idx], v_surf[idx]
+    axes[1].plot([u0-0.3, u0+0.3], [v0-0.3, v0+0.3], 'orange', lw=2)
+    axes[1].plot([u0-0.3, u0+0.3], [v0+0.3, v0-0.3], 'orange', lw=2)
+
+    axes[1].set_xlim(-1, 4)
+    axes[1].set_ylim(-1, 4)
+    axes[1].set_aspect('equal')
+    axes[1].set_xlabel('u')
+    axes[1].set_ylabel('v')
+    axes[1].set_title('Vue Kruskal (Traversée réelle)')
+    axes[1].legend()
+    
+    plt.tight_layout()
+    plt.show()
+
+plot_collapse()
